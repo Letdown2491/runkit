@@ -15,6 +15,14 @@ Graphical manager for Void Linux runit services. The application targets a frien
 - `runkitd`: privileged helper invoked through `pkexec`; executes `sv` commands and manages the `/var/service` symlinks in a controlled manner.
 - `runkit`: libadwaita interface that lists services, provides detail panes, and delegates every privileged operation (including status reads) to `runkitd`.
 
+## Requirements
+
+- A Void Linux installation
+- GTK 4.14+ and libadwaita 1.4+ runtimes
+- Rust 1.88.0 or newer (tested with 1.88.0)
+- Dbus
+- Polkit
+
 ## Installation
 
 For Void Linux the repository ships an installer that builds release binaries and places them under `/usr/libexec`. It will also install any dependencies, copy icons, and create a runkit.desktop file.
