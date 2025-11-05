@@ -17,7 +17,7 @@ Graphical manager for Void Linux runit services. The application targets a frien
 
 ## Requirements
 
-- A Void Linux installation
+- A distro utilizing runit
 - GTK 4.14+ and libadwaita 1.4+ runtimes
 - Rust 1.88.0 or newer (tested with 1.88.0)
 - Dbus
