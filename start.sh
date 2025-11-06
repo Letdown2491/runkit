@@ -19,8 +19,13 @@ DESKTOP_SOURCE="assets/applications/tech.geektoshi.Runkit.desktop"
 DESKTOP_TARGET="/usr/share/applications/tech.geektoshi.Runkit.desktop"
 DBUS_SERVICE_SOURCE="assets/dbus-1/services/tech.geektoshi.Runkit.service"
 DBUS_SERVICE_TARGET="/usr/share/dbus-1/services/tech.geektoshi.Runkit.service"
+DBUS_SYSTEM_SERVICE_SOURCE="assets/dbus-1/system-services/tech.geektoshi.Runkit1.service"
+DBUS_SYSTEM_SERVICE_TARGET="/usr/share/dbus-1/system-services/tech.geektoshi.Runkit1.service"
+DBUS_SYSTEM_CONFIG_SOURCE="assets/dbus-1/system.d/tech.geektoshi.Runkit1.conf"
+DBUS_SYSTEM_CONFIG_TARGET="/etc/dbus-1/system.d/tech.geektoshi.Runkit1.conf"
 POLKIT_POLICY_SOURCE="assets/polkit-1/actions/tech.geektoshi.Runkit.policy"
 POLKIT_POLICY_TARGET="/usr/share/polkit-1/actions/tech.geektoshi.Runkit.policy"
+SERVICE_DESCRIPTIONS_TEMPLATE="assets/config/services.json"
 
 require_sudo() {
     sudo -v
@@ -111,6 +116,50 @@ install_binaries() {
     done
 }
 
+install_service_descriptions() {
+    local template="$SERVICE_DESCRIPTIONS_TEMPLATE"
+    if [[ ! -f "$template" ]]; then
+        echo "Note: service description template not found at ${template}; skipping."
+        return
+    fi
+
+    local merger_binary="target/release/services-merge"
+    if [[ ! -x "$merger_binary" ]]; then
+        echo "Warning: services-merge helper not found at ${merger_binary}; skipping service description merge."
+        return
+    fi
+
+    local target_user="${SUDO_USER:-$USER}"
+    if [[ -z "$target_user" ]]; then
+        echo "Warning: unable to determine target user for service descriptions; skipping."
+        return
+    fi
+
+    local target_home
+    if ! target_home=$(getent passwd "$target_user" | cut -d: -f6); then
+        echo "Warning: unable to resolve home directory for user '${target_user}'; skipping service description merge."
+        return
+    fi
+
+    if [[ -z "$target_home" ]]; then
+        echo "Warning: resolved empty home directory for user '${target_user}'; skipping service description merge."
+        return
+    fi
+
+    local target_file="${target_home}/.config/runkit/services.json"
+    echo "Merging service descriptions into '${target_file}' for user '${target_user}'..."
+
+    if [[ "$target_user" == "$USER" ]]; then
+        if ! "$merger_binary" --template "$template" --target "$target_file"; then
+            echo "Warning: failed to merge service descriptions for ${target_user}."
+        fi
+    else
+        if ! sudo -u "$target_user" "$merger_binary" --template "$template" --target "$target_file"; then
+            echo "Warning: failed to merge service descriptions for ${target_user}."
+        fi
+    fi
+}
+
 install_icons() {
     local installed_any=false
     local missing_sizes=()
@@ -163,6 +212,20 @@ install_dbus_service() {
         sudo install -D -m644 "$DBUS_SERVICE_SOURCE" "$DBUS_SERVICE_TARGET"
     else
         echo "Note: D-Bus service file not found at ${DBUS_SERVICE_SOURCE}; skipping."
+    fi
+
+    if [[ -f "$DBUS_SYSTEM_SERVICE_SOURCE" ]]; then
+        echo "Installing system D-Bus service '$DBUS_SYSTEM_SERVICE_SOURCE' -> '$DBUS_SYSTEM_SERVICE_TARGET'..."
+        sudo install -D -m644 "$DBUS_SYSTEM_SERVICE_SOURCE" "$DBUS_SYSTEM_SERVICE_TARGET"
+    else
+        echo "Note: system D-Bus service file not found at ${DBUS_SYSTEM_SERVICE_SOURCE}; skipping."
+    fi
+
+    if [[ -f "$DBUS_SYSTEM_CONFIG_SOURCE" ]]; then
+        echo "Installing system D-Bus policy '$DBUS_SYSTEM_CONFIG_SOURCE' -> '$DBUS_SYSTEM_CONFIG_TARGET'..."
+        sudo install -D -m644 "$DBUS_SYSTEM_CONFIG_SOURCE" "$DBUS_SYSTEM_CONFIG_TARGET"
+    else
+        echo "Note: system D-Bus policy not found at ${DBUS_SYSTEM_CONFIG_SOURCE}; skipping."
     fi
 }
 
@@ -219,6 +282,14 @@ uninstall_dbus_service() {
         echo "Removing D-Bus service '$DBUS_SERVICE_TARGET'..."
         sudo rm -f "$DBUS_SERVICE_TARGET"
     fi
+    if [[ -f "$DBUS_SYSTEM_SERVICE_TARGET" ]]; then
+        echo "Removing system D-Bus service '$DBUS_SYSTEM_SERVICE_TARGET'..."
+        sudo rm -f "$DBUS_SYSTEM_SERVICE_TARGET"
+    fi
+    if [[ -f "$DBUS_SYSTEM_CONFIG_TARGET" ]]; then
+        echo "Removing system D-Bus policy '$DBUS_SYSTEM_CONFIG_TARGET'..."
+        sudo rm -f "$DBUS_SYSTEM_CONFIG_TARGET"
+    fi
 }
 
 uninstall_polkit_policy() {
@@ -259,10 +330,11 @@ case "$ACTION" in
         install_dependencies
         build_binaries
         install_binaries
-        install_icons
-        install_desktop_entry
-        install_dbus_service
-        install_polkit_policy
+    install_icons
+    install_desktop_entry
+    install_dbus_service
+    install_polkit_policy
+    install_service_descriptions
         ;;
     uninstall)
         require_sudo

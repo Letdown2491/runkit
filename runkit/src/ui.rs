@@ -150,11 +150,26 @@ impl AppWidgets {
         header.set_show_end_title_buttons(false);
         toolbar_view.add_top_bar(&header);
 
+        let header_start_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .build();
+        header.pack_start(&header_start_box);
+
+        let header_end_box = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(6)
+            .build();
+        header.pack_end(&header_end_box);
+
         let header_logo = gtk::Image::from_icon_name("runkit");
         header_logo.set_pixel_size(24);
         header_logo.set_margin_start(6);
+        header_logo.set_margin_end(6);
         header_logo.set_valign(gtk::Align::Center);
-        header.pack_start(&header_logo);
+
+        let window_controls_start = gtk::WindowControls::new(gtk::PackType::Start);
+        header_start_box.append(&window_controls_start);
 
         let style_manager = adw::StyleManager::default();
         let initial_scheme = style_manager.color_scheme();
@@ -302,14 +317,77 @@ impl AppWidgets {
         popover_box.append(&menu_list);
         popover.set_child(Some(&popover_box));
 
-        let window_controls = gtk::WindowControls::new(gtk::PackType::End);
-        let header_controls_box = gtk::Box::builder()
-            .orientation(gtk::Orientation::Horizontal)
-            .spacing(6)
-            .build();
-        header_controls_box.append(&menu_button);
-        header_controls_box.append(&window_controls);
-        header.pack_end(&header_controls_box);
+        header_end_box.append(&menu_button);
+        let window_controls_end = gtk::WindowControls::new(gtk::PackType::End);
+        header_end_box.append(&window_controls_end);
+
+        let header_logo_for_update = header_logo.clone();
+        let header_start_box_for_update = header_start_box.clone();
+        let header_end_box_for_update = header_end_box.clone();
+        let menu_button_for_update = menu_button.clone();
+        let header_for_update = header.clone();
+        let window_controls_start_for_update = window_controls_start.clone();
+        let window_controls_end_for_update = window_controls_end.clone();
+
+        let update_logo_position: Rc<dyn Fn(Option<glib::GString>)> =
+            Rc::new(move |layout: Option<glib::GString>| {
+                const FALLBACK_LAYOUT: &str = "icon:minimize,maximize,close";
+                let layout_str = layout
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| FALLBACK_LAYOUT.to_string());
+
+                let mut parts = layout_str.splitn(2, ':');
+                let start_tokens_raw = parts.next().unwrap_or_default();
+                let end_tokens_raw = parts.next().unwrap_or_default();
+
+                let mut start_tokens: Vec<String> = start_tokens_raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|token| !token.is_empty())
+                    .map(str::to_string)
+                    .collect();
+                let mut end_tokens: Vec<String> = end_tokens_raw
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|token| !token.is_empty())
+                    .map(str::to_string)
+                    .collect();
+
+                let controls_on_left = start_tokens
+                    .iter()
+                    .any(|token| matches!(token.as_str(), "minimize" | "maximize" | "close"));
+
+                start_tokens.retain(|token| !matches!(token.as_str(), "icon" | "appmenu"));
+                end_tokens.retain(|token| !matches!(token.as_str(), "icon" | "appmenu"));
+
+                let start_layout = start_tokens.join(",");
+                let end_layout = end_tokens.join(",");
+                let sanitized_layout = format!("{start_layout}:{end_layout}");
+
+                header_for_update.set_decoration_layout(Some(&sanitized_layout));
+                window_controls_start_for_update.set_decoration_layout(Some(&sanitized_layout));
+                window_controls_end_for_update.set_decoration_layout(Some(&sanitized_layout));
+
+                header_logo_for_update.unparent();
+                if controls_on_left {
+                    header_end_box_for_update
+                        .insert_child_after(&header_logo_for_update, Some(&menu_button_for_update));
+                } else {
+                    header_start_box_for_update.append(&header_logo_for_update);
+                }
+            });
+
+        if let Some(settings) = gtk::Settings::default() {
+            update_logo_position(settings.gtk_decoration_layout());
+            let update_logo_position = Rc::clone(&update_logo_position);
+            settings.connect_gtk_decoration_layout_notify(move |settings| {
+                update_logo_position(settings.gtk_decoration_layout());
+            });
+        } else {
+            update_logo_position(None);
+        }
 
         let banner = adw::Banner::new("");
         banner.set_revealed(false);

@@ -3,6 +3,7 @@ members = [
     "runkit-core",
     "runkit",
     "runkitd",
+    "services-merge",
 ]
 
 resolver = "2"

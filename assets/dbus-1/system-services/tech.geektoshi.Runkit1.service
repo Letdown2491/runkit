@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=tech.geektoshi.Runkit1
+Exec=/usr/libexec/runkitd --dbus-service
+User=root

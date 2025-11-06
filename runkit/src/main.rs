@@ -156,24 +156,32 @@ impl Default for StartupBehavior {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 struct UserPreferences {
     auto_refresh: bool,
     refresh_interval_secs: u32,
     log_lines: u32,
     startup_behavior: StartupBehavior,
     show_all_services: bool,
+    #[serde(default = "default_true")]
+    require_password: bool,
     last_service: Option<String>,
 }
 
 impl Default for UserPreferences {
     fn default() -> Self {
         Self {
-            auto_refresh: false,
+            auto_refresh: true,
             refresh_interval_secs: 30,
             log_lines: 200,
             startup_behavior: StartupBehavior::ShowOverview,
             show_all_services: true,
+            require_password: true,
             last_service: None,
         }
     }
@@ -312,7 +320,7 @@ impl AppController {
 
     fn request_initial_load(self: &Rc<Self>) {
         self.widgets.show_loading(true);
-        let result = self.dispatcher.fetch_services(true);
+        let result = self.dispatcher.fetch_services();
         self.widgets.show_loading(false);
         match result {
             Ok(services) => self.update_services(services),
@@ -516,7 +524,11 @@ impl AppController {
 
     fn trigger_action(self: &Rc<Self>, action: &'static str) {
         if let Some(service_name) = self.widgets.current_service() {
-            match self.dispatcher.run(action, &service_name) {
+            let allow_cached = {
+                let prefs = self.preferences.borrow();
+                !prefs.require_password
+            };
+            match self.dispatcher.run(action, &service_name, allow_cached) {
                 Ok(message) => {
                     let (entries_snapshot, notes_snapshot) = {
                         let mut model = self.model.borrow_mut();
@@ -565,7 +577,7 @@ impl AppController {
         if !silent {
             self.widgets.show_loading(true);
         }
-        let result = self.dispatcher.fetch_services(true);
+        let result = self.dispatcher.fetch_services();
         self.widgets.show_loading(false);
         match result {
             Ok(services) => self.update_services(services),
@@ -712,6 +724,18 @@ impl AppController {
         auto_row.set_activatable_widget(Some(&auto_switch));
         refresh_group.add(&auto_row);
 
+        let auth_row = adw::ActionRow::builder()
+            .title("Require password for service changes")
+            .subtitle("Ask for authentication every time a privileged action runs.")
+            .build();
+        let auth_switch = gtk::Switch::builder()
+            .valign(gtk::Align::Center)
+            .active(prefs_snapshot.require_password)
+            .build();
+        auth_row.add_suffix(&auth_switch);
+        auth_row.set_activatable_widget(Some(&auth_switch));
+        refresh_group.add(&auth_row);
+
         let interval_adjustment = gtk::Adjustment::new(
             prefs_snapshot.refresh_interval_secs as f64,
             MIN_REFRESH_INTERVAL as f64,
@@ -781,6 +805,24 @@ impl AppController {
                 if changed {
                     controller.save_preferences();
                     controller.configure_auto_refresh();
+                }
+            }
+            glib::Propagation::Proceed
+        });
+
+        let controller_for_auth = Rc::downgrade(self);
+        auth_switch.connect_state_set(move |_, state| {
+            if let Some(controller) = controller_for_auth.upgrade() {
+                let mut changed = false;
+                {
+                    let mut prefs = controller.preferences.borrow_mut();
+                    if prefs.require_password != state {
+                        prefs.require_password = state;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    controller.save_preferences();
                 }
             }
             glib::Propagation::Proceed

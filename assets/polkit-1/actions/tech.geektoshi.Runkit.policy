@@ -2,8 +2,20 @@
 <!DOCTYPE policyconfig PUBLIC "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
   "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <policyconfig>
-  <action id="tech.geektoshi.Runkit">
-    <description>Run privileged Runkit operations</description>
+  <action id="tech.geektoshi.Runkit.require_password">
+    <description>Manage runit services (always require password)</description>
+    <message>Authentication is required to manage runit services.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/runkitd</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+  <action id="tech.geektoshi.Runkit.cached">
+    <description>Manage runit services (reuse authorization while Runkit is open)</description>
     <message>Authentication is required to manage runit services.</message>
     <defaults>
       <allow_any>auth_admin_keep</allow_any>

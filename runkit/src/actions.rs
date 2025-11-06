@@ -1,49 +1,55 @@
 use runkit_core::{DesiredState, ServiceInfo, ServiceRuntimeState};
 use serde::Deserialize;
 use serde_json::Value;
-use std::env;
-use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
+use zbus::blocking::{Connection, Proxy};
+use zbus::zvariant::Type;
+
+const BUS_NAME: &str = "tech.geektoshi.Runkit1";
+const OBJECT_PATH: &str = "/tech/geektoshi/Runkit1";
+const INTERFACE: &str = "tech.geektoshi.Runkit1.Controller";
 
 #[derive(Clone)]
 pub struct ActionDispatcher {
-    helper_path: PathBuf,
-    use_pkexec: bool,
+    connection: Connection,
 }
 
 impl Default for ActionDispatcher {
     fn default() -> Self {
-        let helper_path = env::var("RUNKITD_PATH")
-            .or_else(|_| env::var("RUNKIT_HELPER_PATH"))
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from("/usr/libexec/runkitd"));
-        let use_pkexec = env::var("RUNKITD_NO_PKEXEC")
-            .or_else(|_| env::var("RUNKIT_HELPER_NO_PKEXEC"))
-            .map(|value| value == "0" || value.eq_ignore_ascii_case("false"))
-            .unwrap_or(true);
-
-        ActionDispatcher {
-            helper_path,
-            use_pkexec,
-        }
+        let connection =
+            Connection::system().expect("Failed to connect to the system bus for runkitd");
+        ActionDispatcher { connection }
     }
 }
 
 impl ActionDispatcher {
-    fn execute(
-        &self,
-        privileged: bool,
-        action: &str,
-        service: Option<&str>,
-        extra: &[&str],
-    ) -> Result<DaemonProcessResponse, String> {
-        let use_pkexec = privileged && self.use_pkexec;
-        execute_helper(self.helper_path.clone(), use_pkexec, action, service, extra)
+    fn proxy(&self) -> Result<Proxy<'_>, String> {
+        Proxy::new(&self.connection, BUS_NAME, OBJECT_PATH, INTERFACE)
+            .map_err(|err| format!("Failed to connect to runkitd: {err}"))
     }
 
-    pub fn run(&self, action: &str, service: &str) -> Result<String, String> {
-        let response = self.execute(true, action, Some(service), &[])?;
+    fn call_helper<T>(&self, method: &str, body: &T) -> Result<DaemonProcessResponse, String>
+    where
+        T: serde::ser::Serialize + Type,
+    {
+        let proxy = self.proxy()?;
+        let reply: String = proxy
+            .call(method, body)
+            .map_err(|err| format!("runkitd call {method} failed: {err}"))?;
+        serde_json::from_str(&reply)
+            .map_err(|err| format!("Failed to decode runkitd response for {method}: {err}"))
+    }
+
+    pub fn run(
+        &self,
+        action: &str,
+        service: &str,
+        allow_cached_authorization: bool,
+    ) -> Result<String, String> {
+        let response = self.call_helper(
+            "PerformAction",
+            &(action, service, allow_cached_authorization),
+        )?;
         match response.status.as_str() {
             "ok" => Ok(response
                 .message
@@ -54,8 +60,8 @@ impl ActionDispatcher {
         }
     }
 
-    pub fn fetch_services(&self, privileged: bool) -> Result<Vec<ServiceInfo>, String> {
-        let response = self.execute(privileged, "list", None, &[])?;
+    pub fn fetch_services(&self) -> Result<Vec<ServiceInfo>, String> {
+        let response = self.call_helper::<()>("ListServices", &())?;
         if response.status.as_str() != "ok" {
             return Err(response
                 .message
@@ -73,9 +79,8 @@ impl ActionDispatcher {
     }
 
     pub fn fetch_logs(&self, service: &str, lines: usize) -> Result<Vec<LogEntry>, String> {
-        let limit_arg = lines.max(1).to_string();
-        let extra_args = ["--lines", limit_arg.as_str()];
-        let response = self.execute(false, "logs", Some(service), &extra_args)?;
+        let line_cap = lines.max(1).min(u32::MAX as usize) as u32;
+        let response = self.call_helper("FetchLogs", &(service, line_cap))?;
 
         if response.status.as_str() != "ok" {
             return Err(response
@@ -94,7 +99,7 @@ impl ActionDispatcher {
     }
 
     pub fn fetch_description(&self, service: &str) -> Result<Option<String>, String> {
-        let response = self.execute(false, "describe", Some(service), &[])?;
+        let response = self.call_helper("FetchDescription", &(service,))?;
 
         if response.status.as_str() != "ok" {
             return Err(response
@@ -113,95 +118,11 @@ impl ActionDispatcher {
     }
 }
 
-fn execute_helper(
-    helper_path: PathBuf,
-    use_pkexec: bool,
-    action: &str,
-    service: Option<&str>,
-    extra: &[&str],
-) -> Result<DaemonProcessResponse, String> {
-    let mut command = if use_pkexec {
-        let mut cmd = Command::new("pkexec");
-        cmd.arg(&helper_path);
-        cmd
-    } else {
-        Command::new(&helper_path)
-    };
-    command.arg(action);
-    if let Some(service) = service {
-        command.arg(service);
-    }
-    for arg in extra {
-        command.arg(arg);
-    }
-
-    let action_label = match service {
-        Some(service) => format!("{action} {service}"),
-        None => action.to_string(),
-    };
-
-    match command.output() {
-        Ok(output) => {
-            let stdout = output.stdout;
-            let trimmed = String::from_utf8_lossy(&stdout).trim().to_string();
-            if trimmed.is_empty() {
-                if output.status.success() {
-                    return Err(format!(
-                        "runkitd returned an empty response for {action_label}"
-                    ));
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(if stderr.trim().is_empty() {
-                        format!(
-                            "runkitd exited with status {} for {action_label}",
-                            output.status.code().unwrap_or(-1)
-                        )
-                    } else {
-                        stderr.trim().to_string()
-                    });
-                }
-            }
-            match parse_response(&trimmed) {
-                Ok(response) => Ok(response),
-                Err(parse_err) => {
-                    if output.status.success() {
-                        Err(format!(
-                            "Failed to parse runkitd response for {action_label}: {parse_err} (raw: {trimmed})"
-                        ))
-                    } else {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        Err(if stderr.trim().is_empty() {
-                            format!(
-                                "runkitd exited with status {} for {action_label}",
-                                output.status.code().unwrap_or(-1)
-                            )
-                        } else {
-                            stderr.trim().to_string()
-                        })
-                    }
-                }
-            }
-        }
-        Err(err) => Err(format!("Failed to invoke runkitd: {err}")),
-    }
-}
-
 #[derive(Debug, Deserialize)]
 struct DaemonProcessResponse {
     status: String,
     message: Option<String>,
     data: Option<Value>,
-}
-
-fn parse_response(data: &str) -> Result<DaemonProcessResponse, serde_json::Error> {
-    if data.is_empty() {
-        Err(serde_json::Error::io(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "empty response",
-        )))
-    } else {
-        serde_json::from_str(data)
-    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -214,46 +135,14 @@ struct ServiceSnapshot {
     description: Option<String>,
 }
 
-#[derive(Clone, Debug)]
-pub struct LogEntry {
-    pub unix_seconds: Option<i64>,
-    pub nanos: Option<u32>,
-    pub raw: Option<String>,
-    pub message: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct LogEntrySnapshot {
-    unix_seconds: Option<i64>,
-    nanos: Option<u32>,
-    raw: Option<String>,
-    message: String,
-}
-
-impl From<LogEntrySnapshot> for LogEntry {
-    fn from(snapshot: LogEntrySnapshot) -> Self {
-        LogEntry {
-            unix_seconds: snapshot.unix_seconds,
-            nanos: snapshot.nanos,
-            raw: snapshot.raw,
-            message: snapshot.message,
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct DescriptionSnapshot {
-    description: Option<String>,
-}
-
 impl From<ServiceSnapshot> for ServiceInfo {
     fn from(snapshot: ServiceSnapshot) -> Self {
         ServiceInfo {
             name: snapshot.name,
-            definition_path: PathBuf::from(snapshot.definition_path),
+            definition_path: snapshot.definition_path.into(),
             enabled: snapshot.enabled,
-            desired_state: snapshot.desired_state.into(),
-            runtime_state: snapshot.runtime_state.into(),
+            desired_state: DesiredState::from(snapshot.desired_state),
+            runtime_state: ServiceRuntimeState::from(snapshot.runtime_state),
             description: snapshot.description,
         }
     }
@@ -325,4 +214,38 @@ impl From<SnapshotRuntimeState> for ServiceRuntimeState {
             SnapshotRuntimeState::Unknown { raw } => ServiceRuntimeState::Unknown { raw },
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct LogEntrySnapshot {
+    unix_seconds: Option<i64>,
+    nanos: Option<u32>,
+    raw: Option<String>,
+    message: String,
+}
+
+impl From<LogEntrySnapshot> for LogEntry {
+    fn from(snapshot: LogEntrySnapshot) -> Self {
+        LogEntry {
+            unix_seconds: snapshot.unix_seconds,
+            nanos: snapshot.nanos,
+            raw: snapshot.raw,
+            message: snapshot.message,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    pub unix_seconds: Option<i64>,
+    pub nanos: Option<u32>,
+    pub raw: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DescriptionSnapshot {
+    #[allow(dead_code)]
+    service: String,
+    description: Option<String>,
 }
