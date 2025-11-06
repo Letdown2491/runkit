@@ -1,6 +1,7 @@
 # Changelog
 
 ## 1.3.11
+- Added filter to toggle between enabled services and all services.
 - Added the new workspace member services-merge so the installer can use a Rust helper without additional dependencies.
 - Implemented helper to load the services.json template and existing cache, overlay template entries, and persist the merged map with directory creation handled automatically.
 - Wired the installer to detect the template, resolve the target user’s home, and invoke the helper so ~/.config/runkit/services.json is always updated with template-preferred values.
@@ -16,8 +17,4 @@
 - Updated version number.
     
 ## 1.0.0
-- Discover catalog with curated categories, recent updates, and full-text search for Void Linux software.
-- Split-view app details pane with homepage links, dependency navigation, install/remove actions, and consistent layout across sections.
-- Installed and Updates dashboards with queued operations, update checks after startup, and XBPS-powered upgrade workflows.
-- Startup experience tuned for responsiveness, including deferred update refresh and centered toolbar navigation.
-- Bundled icons, desktop entry, and category data generation tooling for distribution builds.
+- Initial release
