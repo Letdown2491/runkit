@@ -12,7 +12,7 @@
 - Set "Refresh services automatically" to off by default.
 - Replaced the pkexec CLI with a long-lived D-Bus service that reuses the existing helper logic, gates privileged calls through polkit (switching between tech.geektoshi.Runkit.require_password and keeps JSON responses for the UI.
 - Added a blocking D-Bus proxy instead of spawning runkitd to store a new require_password preference (toggled in Preferences).
-- Minor bugfixes.
+- Minor bug fixes.
 - Added CHANGELOG.md.
 - Updated version number.
     
