@@ -61,5 +61,6 @@
   "virtstoraged": "Virtualization API for controlling virtualization engines",
   "virtvboxd": "Virtualization API for controlling virtualization engines",
   "virtxend": "Virtualization API for controlling virtualization engines",
+  "waypoint-scheduler": "Automatic Btrfs snapshot service for Waypoint GTK",
   "wpa_supplicant": "WPA/WPA2/IEEE 802.1X Supplicant"
 }
