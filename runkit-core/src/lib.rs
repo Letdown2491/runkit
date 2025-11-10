@@ -519,3 +519,73 @@ fn strip_package_version(package: &str) -> &str {
     }
     package
 }
+
+/// Type of activity event that occurred for a service.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ActivityEventType {
+    /// Service state changed (e.g., down -> up, up -> failed)
+    StateChange {
+        from_state: String,
+        to_state: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pid: Option<u32>,
+    },
+    /// User performed an action on the service
+    UserAction {
+        action: String,
+        success: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+}
+
+/// A single activity event for a service with timestamp.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ActivityEvent {
+    /// ISO 8601 timestamp when the event occurred
+    pub timestamp: String,
+    /// The type of event that occurred
+    #[serde(flatten)]
+    pub event_type: ActivityEventType,
+}
+
+impl ActivityEvent {
+    pub fn new(event_type: ActivityEventType) -> Self {
+        use std::time::SystemTime;
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        let timestamp = format!(
+            "{}",
+            chrono::DateTime::<chrono::Utc>::from_timestamp(now.as_secs() as i64, now.subsec_nanos())
+                .unwrap_or_default()
+                .to_rfc3339()
+        );
+        ActivityEvent {
+            timestamp,
+            event_type,
+        }
+    }
+}
+
+impl ServiceRuntimeState {
+    /// Get a simple string representation of the state for activity tracking.
+    pub fn state_name(&self) -> &'static str {
+        match self {
+            ServiceRuntimeState::Running { .. } => "running",
+            ServiceRuntimeState::Down { .. } => "down",
+            ServiceRuntimeState::Failed { .. } => "failed",
+            ServiceRuntimeState::Unknown { .. } => "unknown",
+        }
+    }
+
+    /// Get the PID if the service is running or failed.
+    pub fn pid(&self) -> Option<u32> {
+        match self {
+            ServiceRuntimeState::Running { pid, .. } => Some(*pid),
+            ServiceRuntimeState::Failed { pid, .. } => Some(*pid),
+            _ => None,
+        }
+    }
+}

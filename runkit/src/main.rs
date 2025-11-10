@@ -7,10 +7,10 @@ use gtk::glib::ControlFlow;
 use gtk::glib::{self, source::SourceId};
 use gtk4::{self as gtk, pango};
 use libadwaita::{self as adw, Application, prelude::*};
-use runkit_core::ServiceInfo;
+use runkit_core::{ActivityEvent, ActivityEventType, ServiceInfo};
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::env;
 use std::fs;
 use std::io;
@@ -37,6 +37,7 @@ struct AppController {
     model: Rc<RefCell<AppModel>>,
     widgets: ui::AppWidgets,
     description_store: RefCell<DescriptionStore>,
+    activity_store: RefCell<ActivityStore>,
     preferences_window: RefCell<Option<adw::PreferencesWindow>>,
     about_dialog: RefCell<Option<adw::MessageDialog>>,
     preferences: RefCell<UserPreferences>,
@@ -55,6 +56,8 @@ struct AppModel {
     list_refreshing: bool,
     activity_notes: Vec<String>,
     pending_selection: Option<String>,
+    previous_states: HashMap<String, (String, Option<u32>)>, // service -> (state_name, pid)
+    initial_load_completed: bool,
 }
 
 struct DescriptionStore {
@@ -122,6 +125,88 @@ fn description_store_path() -> Option<PathBuf> {
     let mut base = config_root()?;
     base.push("runkit");
     base.push("services.json");
+    Some(base)
+}
+
+const MAX_ACTIVITY_PER_SERVICE: usize = 10;
+
+#[derive(Serialize, Deserialize)]
+struct ActivityStoreData {
+    entries: HashMap<String, VecDeque<ActivityEvent>>,
+    #[serde(default)]
+    previous_states: HashMap<String, (String, Option<u32>)>, // service -> (state_name, pid)
+}
+
+struct ActivityStore {
+    path: Option<PathBuf>,
+    data: ActivityStoreData,
+}
+
+impl ActivityStore {
+    fn load() -> Self {
+        let path = activity_store_path();
+        let data: ActivityStoreData = path
+            .as_ref()
+            .and_then(|p| fs::read_to_string(p).ok())
+            .and_then(|data| serde_json::from_str(&data).ok())
+            .unwrap_or_else(|| ActivityStoreData {
+                entries: HashMap::new(),
+                previous_states: HashMap::new(),
+            });
+        ActivityStore { path, data }
+    }
+
+    fn get_activities(&self, service: &str) -> Vec<ActivityEvent> {
+        self.data
+            .entries
+            .get(service)
+            .map(|deque| deque.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn get_previous_states(&self) -> HashMap<String, (String, Option<u32>)> {
+        self.data.previous_states.clone()
+    }
+
+    fn add_event(&mut self, service: &str, event: ActivityEvent) {
+        let deque = self.data.entries.entry(service.to_string()).or_default();
+        deque.push_back(event);
+
+        // Keep only the last MAX_ACTIVITY_PER_SERVICE entries
+        while deque.len() > MAX_ACTIVITY_PER_SERVICE {
+            deque.pop_front();
+        }
+
+        if let Err(err) = self.save() {
+            eprintln!("Failed to persist activity for {service}: {err}");
+        }
+    }
+
+    fn update_previous_states(&mut self, previous_states: HashMap<String, (String, Option<u32>)>) {
+        self.data.previous_states = previous_states;
+        if let Err(err) = self.save() {
+            eprintln!("Failed to persist previous states: {err}");
+        }
+    }
+
+    fn save(&self) -> io::Result<()> {
+        let path = match &self.path {
+            Some(path) => path,
+            None => return Ok(()),
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let data = serde_json::to_string_pretty(&self.data)
+            .map_err(|err| io::Error::new(io::ErrorKind::Other, err))?;
+        fs::write(path, data)
+    }
+}
+
+fn activity_store_path() -> Option<PathBuf> {
+    let mut base = config_root()?;
+    base.push("runkit");
+    base.push("activity.json");
     Some(base)
 }
 
@@ -230,11 +315,20 @@ impl AppController {
         let preferences = load_user_preferences();
         let widgets = ui::AppWidgets::new(app, preferences.show_all_services);
         let description_store = DescriptionStore::load();
+        let activity_store = ActivityStore::load();
+
+        // Load previous states from activity store
+        let previous_states = activity_store.get_previous_states();
+
+        let mut model = AppModel::default();
+        model.previous_states = previous_states;
+
         let controller = Rc::new(Self {
             dispatcher,
-            model: Rc::new(RefCell::new(AppModel::default())),
+            model: Rc::new(RefCell::new(model)),
             widgets,
             description_store: RefCell::new(description_store),
+            activity_store: RefCell::new(activity_store),
             preferences_window: RefCell::new(None),
             about_dialog: RefCell::new(None),
             preferences: RefCell::new(preferences),
@@ -440,6 +534,53 @@ impl AppController {
                 }
             }
         }
+
+        // Detect state changes and record activity
+        {
+            let mut activity_store = self.activity_store.borrow_mut();
+            let mut model = self.model.borrow_mut();
+            let is_initial_load = !model.initial_load_completed;
+
+            for service in &services {
+                let current_state = service.runtime_state.state_name();
+                let current_pid = service.runtime_state.pid();
+
+                if let Some((prev_state, prev_pid)) = model.previous_states.get(&service.name) {
+                    // Check if state changed
+                    if prev_state != current_state {
+                        let event = ActivityEvent::new(ActivityEventType::StateChange {
+                            from_state: prev_state.to_string(),
+                            to_state: current_state.to_string(),
+                            pid: current_pid,
+                        });
+                        activity_store.add_event(&service.name, event);
+                    }
+                    // Check if PID changed while running (indicates restart)
+                    else if current_state == "running" && prev_pid != &current_pid {
+                        let event = ActivityEvent::new(ActivityEventType::StateChange {
+                            from_state: "running".to_string(),
+                            to_state: "running".to_string(),
+                            pid: current_pid,
+                        });
+                        activity_store.add_event(&service.name, event);
+                    }
+                }
+
+                // Update the previous state
+                model
+                    .previous_states
+                    .insert(service.name.clone(), (current_state.to_string(), current_pid));
+            }
+
+            // Mark initial load as completed
+            if is_initial_load {
+                model.initial_load_completed = true;
+            }
+
+            // Save previous states to disk
+            activity_store.update_previous_states(model.previous_states.clone());
+        }
+
         let pending_selection = {
             let prefs = self.preferences.borrow();
             if prefs.startup_behavior == StartupBehavior::RememberLastService {
@@ -530,6 +671,17 @@ impl AppController {
             };
             match self.dispatcher.run(action, &service_name, allow_cached) {
                 Ok(message) => {
+                    // Record successful user action
+                    {
+                        let mut activity_store = self.activity_store.borrow_mut();
+                        let event = ActivityEvent::new(ActivityEventType::UserAction {
+                            action: action.to_string(),
+                            success: true,
+                            error: None,
+                        });
+                        activity_store.add_event(&service_name, event);
+                    }
+
                     let (entries_snapshot, notes_snapshot) = {
                         let mut model = self.model.borrow_mut();
                         if model.log_service.as_deref() != Some(service_name.as_str()) {
@@ -550,6 +702,17 @@ impl AppController {
                     self.request_refresh(true);
                 }
                 Err(err) => {
+                    // Record failed user action
+                    {
+                        let mut activity_store = self.activity_store.borrow_mut();
+                        let event = ActivityEvent::new(ActivityEventType::UserAction {
+                            action: action.to_string(),
+                            success: false,
+                            error: Some(err.to_string()),
+                        });
+                        activity_store.add_event(&service_name, event);
+                    }
+
                     let error_message = format!("Operation failed: {err}");
                     let (entries_snapshot, notes_snapshot) = {
                         let mut model = self.model.borrow_mut();
@@ -590,13 +753,26 @@ impl AppController {
         let lines = self.preferences.borrow().log_lines.max(1) as usize;
         match self.dispatcher.fetch_logs(&service, lines) {
             Ok(entries) => {
-                let notes = {
+                let mut notes = {
+                    let model = self.model.borrow();
+                    model.activity_notes.clone()
+                };
+
+                // Prepend activity history to notes
+                let activity_history = self.format_activity_history(&service);
+                if !activity_history.is_empty() {
+                    // Insert activity history at the beginning
+                    for (i, activity_line) in activity_history.into_iter().enumerate() {
+                        notes.insert(i, activity_line);
+                    }
+                }
+
+                {
                     let mut model = self.model.borrow_mut();
                     model.log_service = Some(service.clone());
                     model.log_entries = entries.clone();
                     model.log_error = None;
-                    model.activity_notes.clone()
-                };
+                }
                 self.widgets.show_activity(&service, &entries, &notes);
             }
             Err(err) => {
@@ -607,6 +783,71 @@ impl AppController {
                     model.log_error = Some(err.clone());
                 }
                 self.widgets.show_activity_error(&service, &err);
+            }
+        }
+    }
+
+    fn format_activity_history(&self, service: &str) -> Vec<String> {
+        let activity_store = self.activity_store.borrow();
+        let activities = activity_store.get_activities(service);
+
+        activities
+            .into_iter()
+            .rev() // Show most recent first
+            .map(|event| self.format_activity_event(&event))
+            .collect()
+    }
+
+    fn format_activity_event(&self, event: &ActivityEvent) -> String {
+        use chrono::DateTime;
+
+        let timestamp = DateTime::parse_from_rfc3339(&event.timestamp)
+            .ok()
+            .and_then(|dt| {
+                let local: chrono::DateTime<chrono::Local> = dt.into();
+                Some(local.format("%b %d, %I:%M %p").to_string())
+            })
+            .unwrap_or_else(|| "Unknown time".to_string());
+
+        match &event.event_type {
+            ActivityEventType::StateChange {
+                from_state,
+                to_state,
+                pid,
+            } => {
+                if from_state == to_state && to_state == "running" {
+                    // This is a restart (PID change while running)
+                    if let Some(pid) = pid {
+                        format!("Service restarted (PID {}) - {}", pid, timestamp)
+                    } else {
+                        format!("Service restarted - {}", timestamp)
+                    }
+                } else {
+                    let to_desc = match to_state.as_str() {
+                        "running" => "started",
+                        "down" => "stopped",
+                        "failed" => "failed",
+                        _ => to_state.as_str(),
+                    };
+                    if let Some(pid) = pid {
+                        format!("Service {} (PID {}) - {}", to_desc, pid, timestamp)
+                    } else {
+                        format!("Service {} - {}", to_desc, timestamp)
+                    }
+                }
+            }
+            ActivityEventType::UserAction {
+                action,
+                success,
+                error,
+            } => {
+                if *success {
+                    format!("User action: {} - {}", action, timestamp)
+                } else if let Some(err) = error {
+                    format!("User action: {} failed ({}) - {}", action, err, timestamp)
+                } else {
+                    format!("User action: {} failed - {}", action, timestamp)
+                }
             }
         }
     }
